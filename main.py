@@ -21,9 +21,8 @@ import torchvision.transforms as transforms
 import corticaldataset
 
 
-import models
+import network
 import clustering
-import lime.lime_tabular
 
 from util import AverageMeter, UnifLabelSampler, load_model
 import matplotlib.pyplot as plt
@@ -36,29 +35,13 @@ import scipy.io as sio
 def parse_args():
     parser = argparse.ArgumentParser(description='PyTorch Implemenation of Subtyping with DeepCluster')
 
-    parser.add_argument('--no', type=str, default=0,
-                        help='The number of implementation')
     parser.add_argument('--mode', type=str,
-                        choices=['train', 'test'], default='train',
+                        choices=['train', 'flatcv', 'nestedcv', 'test'], default='train',
                         help='Setting the mode (default: train)')
-    parser.add_argument('--lime', action='store_true', help='chatty')
-    parser.add_argument('--arch', '-a', type=str, metavar='ARCH',
-                        choices=['mlp', 'alexnet', 'vgg16'], default='mlp',
-                        help='Front architecture (default: mlp)')
-    parser.add_argument('--data', type=str, choices=['raw', 'wscore', 'zscore', 'w-atrophy', 'z-atrophy', 'cor_w-atrophy', 'cor_z-atrophy', 'tau', 'OASIS_atrophy'],
-                        default='raw', help='choose which data type you will use')
-    parser.add_argument('--dx', type=str, choices=['total', 'ad', 'mci', 'cn', 'missing_removed'],
-                        default='total', help='select data according to diagnosis type')
-    parser.add_argument('--level', type=str, choices=['ic6', 'ic4', 'ic3', 'roi'],
-                        default='roi', help='vertex or roi')
-    parser.add_argument('--clustering', type=str, choices=['LV', 'Kmeans', 'PIC', 'GMM'],
-                        default='GMM', help='clustering algorithm (default: GMM)')
+    parser.add_argument('--data', type=str, choices=['ADNI', 'ADNI_mci', 'ADNI_long', 'OASIS'],
+                        default='ADNI', help='choose which data type you will use')
     parser.add_argument('--num_cluster', '--k', type=int, default=4,
                         help='number of cluster for k-means AND gaussian mixture model (default: 3)')
-    parser.add_argument('--niter', type=int, default=500,
-                        help='number of iteration for k-means clsutering')
-    parser.add_argument('--lvgamma', '--gamma', type=float, default=0.9,
-                        help='parameter gamma for louvain method (default: 0.9)')
     parser.add_argument('--lr', default=0.001, type=float,
                         help='learning rate (default: 0.001)')
     parser.add_argument('--wd', default=-5, type=float,
@@ -66,8 +49,6 @@ def parse_args():
     parser.add_argument('--reassign', type=float, default=1.,
                         help="""how many epochs of training between two consecutive
                         reassignments of clusters (default: 1)""")
-    parser.add_argument('--earlystop', type=str, choices=['hard', 'soft', 'none'],
-                        default='none', help=" whether you implement earlystopping (default: None)")
     parser.add_argument('--workers', default=4, type=int,
                         help='number of data loading workers (default: 4')
     parser.add_argument('--epochs', type=int, default=100,
@@ -78,11 +59,6 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=31, help='random seed (default: 31)')
     parser.add_argument('--fold_seed', type=int, default=31, help='random seed (default: 31)')
     parser.add_argument('--fold_idx', type=int, default=0, help='choose the fold index of cross-validation')
-    parser.add_argument('--verbose', action='store_true', help='chatty')
-    parser.add_argument('--resume', default='', type=str, metavar='PATH',
-                        help='path to checkpoint (default: None)')
-    parser.add_argument('--start_epoch', default=0, type=int,
-                        help='manual epoch number (useful on restarts) (default: 0)')
     parser.add_argument('--model', default='', type=str, metavar='PATH',
                         help='path to model (default: None)')
     return parser.parse_args()
@@ -267,7 +243,7 @@ def test_(loader, model):
 
 
 args = parse_args()
-if args.mode == 'train':
+if args.mode == 'flatcv':
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         print("/// Cuda is available ///")
@@ -276,35 +252,15 @@ if args.mode == 'train':
     random.seed(args.seed)
 
 
-    print('Architecture: {}'.format(args.arch))
-    print(args.no)
     print('K : {}'.format(args.num_cluster))
     print('Data: {}'.format(args.data))
-    print('DX: {}'.format(args.dx))
-    print('Clustering method: {}'.format(args.clustering))
     print('learning rate: {}'.format(args.lr))
     print('reassign : {}'.format(args.reassign))
-    print('fold : {}'.format(args.fold_idx))
-    print()
-    print('')
 
-    if args.level == 'ic6':
-        dim = 76569
-    elif args.level == 'ic3':
-        dim = 1193
-    elif args.level == 'roi':
-        dim = 68
 
-    if not args.model:
-        model = models.__dict__[args.arch](dim=dim, out=args.num_cluster, level=args.level)
-        # model = models.__dict__[args.arch](dim=1193, out=args.num_cluster, level=args.level)
-        fd = int(model.top_layer.weight.size()[1])
-        model.top_layer = None
-    '''Fine-tuning with result from AD'''
-    if args.model:
-        model = load_model(args.model)
-        fd = int(model.top_layer.weight.size()[1])
-
+    model = network.mlp(input_dim=1193, output_dim=args.num_cluster)
+    fd = int(model.top_layer.weight.size()[1])
+    model.top_layer = None
     model.cuda()
     cudnn.benchmark = True
 
@@ -319,27 +275,11 @@ if args.mode == 'train':
     # loss function
     criterion = nn.CrossEntropyLoss().cuda()
 
-    if args.resume:
-        if os.path.isfile(args.resume):
-            print("=> loading checkpoint '{}'".format(args.resume))
-            checkpoint = torch.load(args.resume)
-            args.start_epoch = checkpoint['epoch']
-            # remove top_layer parameters from checkpoint
-            # for key in checkpoint['state_dict']:
-            #     if 'top_layer' in key:
-            #         del checkpoint['state_dict'][key]
-            model.load_state_dict(checkpoint['state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            print("=> loaded checkpoint '{}' (epoch {})"
-                  .format(args.resume, checkpoint['epoch']))
-        else:
-            print("=> no checkpoint found at '{}'".format(args.resume))
-
     # load data
     end = time.time()
     print("loading the dataset...")
 
-    dataset = corticaldataset.CorticalDataset(dx=args.dx, datatype=args.data, level=args.level)
+    dataset = corticaldataset.CorticalDataset(datatype=args.data)
 
     print('Data loading time: {0:.2f} s'.format(time.time() - end))
     print(dataset.x_data.numpy().mean(), dataset.x_data.numpy().std(ddof=1)) #calculate the mean and standard deviation of whole data
@@ -360,12 +300,7 @@ if args.mode == 'train':
                                              pin_memory=True, )
 
     # clustering method selection
-    if args.clustering == 'Kmeans':
-        deepcluster = clustering.__dict__[args.clustering](args.num_cluster)
-    elif args.clustering == 'GMM':
-        deepcluster = clustering.__dict__[args.clustering](args.num_cluster)
-    elif args.clustering == 'LV':
-        deepcluster = clustering.__dict__[args.clustering](args.lvgamma)
+    deepcluster = clustering.__dict__[args.clustering](args.num_cluster)
 
     # train
     losses_t = []
@@ -381,34 +316,16 @@ if args.mode == 'train':
     outputs = []
     targets = []
     clus_features = []
-    # making top directory's profile and some directories at each implementation
 
+    # making top directory's profile and some directories at each implementation
     script_dir = os.path.dirname(__file__)
-    loss_dir = os.path.join(script_dir, '0_loss')
-    members_dir = os.path.join(script_dir, '1_the_number_of_members_in_each_cluster')
-    clusters_dir = os.path.join(script_dir, '2_clusters')
-    nmi_dir = os.path.join(script_dir, '3_nmi_or_ami')
-    label_dir = os.path.join(script_dir, '4_label')
-    convQ_dir = os.path.join(script_dir, '5_convergentQ')
-    acc_dir = os.path.join(script_dir, '6_acc')
-    idx_dir = os.path.join(script_dir, '7_idx')
-    c_loss_dir = os.path.join(script_dir, '8_closs')
-    if args.clustering == 'Kmeans':
-        profile = '_%04d_%s_%s_%s_%s_k=%d_lr=%f_ep=%d_reassign=%d_earlystop=%s_niter=%d_fold_idx=%d'\
-                  % (args.no, args.data, args.dx, bool(args.model), args.clustering, args.num_cluster, args.lr, args.epochs, args.reassign, args.earlystop, args.niter, args.fold_idx)
-    elif args.clustering == 'GMM':
-        profile = '_%s_%s_%s_%s_ft_%s_%s_k=%d_lr=%f_ep=%d_reassign=%d_fold_idx=%d'\
+    profile = '_%s_%s_%s_%s_ft_%s_%s_k=%d_lr=%f_ep=%d_reassign=%d_fold_idx=%d'\
                   % (args.no, args.data, args.dx, args.level, bool(args.model), args.clustering, args.num_cluster, args.lr, args.epochs, args.reassign,  args.fold_idx)
-    elif args.clustering == 'LV':
-        profile = '_%04d_%s_%s_%s_r=%f_lr=%f_ep=%d_reassign=%d_earlystop=%s_fold_idx=%d' % (args.no,args.data, args.dx, args.clustering, args.lvgamma, args.lr, args.epochs, args.reassign, args.earlystop, args.fold_id)
     results_dir = os.path.join(script_dir, 'Results'+profile)
 
 
     for epoch in range(args.epochs):
         end = time.time()
-        if args.model:
-            if epoch == 0:
-                top_layer_tmp = model.top_layer
         # remove head
         model.top_layer = None
         model.features = nn.Sequential(*list(model.features.children())[:-1])
@@ -425,14 +342,8 @@ if args.mode == 'train':
             t_1_images_lists = t_2_images_lists
 
         # cluster the features
-        if args.clustering == 'Kmeans':
-            pseudolabels_unsorted, clustering_loss_train, clustering_loss_test = deepcluster.cluster(features, train_index, test_index, niter=args.niter)
-        elif args.clustering == 'GMM':
-            pseudolabels_unsorted, clustering_loss_train, clustering_loss_test, params = deepcluster.cluster(features, train_index, test_index)
+        pseudolabels_unsorted, clustering_loss_train, clustering_loss_test, params = deepcluster.cluster(features, train_index, test_index)
 
-        elif args.clustering == 'LV':
-            pseudolabels_unsorted, clustering_loss = deepcluster.cluster(features)
-        # print(clustering_loss_train, clustering_loss_test)
         if epoch == 0:
             t_1_label = pseudolabels_unsorted
             t_1_images_lists = deepcluster.images_lists
@@ -469,33 +380,9 @@ if args.mode == 'train':
 
         pseudolabels.append(pseudolabels_2)
 
-        # calculate nmi
-        if args.clustering == 'Kmeans':
-            nmi.append(normalized_mutual_info_score(t_1_label, t_2_label))
-        elif args.clustering == 'GMM':
-            nmi.append(normalized_mutual_info_score(t_1_label, t_2_label))
-        elif args.clustering == 'LV':
-            nmi.append(adjusted_mutual_info_score(t_1_label, t_2_label))
 
-        # early stopping
-        # if args.earlystop == 'hard':
-        #     for i in range(10):
-        #         if epoch >= 10 and abs(nmi[epoch-i] - nmi[epoch-(i+1)]) <= 0.001:
-        #             a = 1
-        #         else:
-        #             a = 0
-        #             break
-        #     if a == 1:
-        #         break
-        # elif args.earlystop == 'soft':
-        #     for i in range(30):
-        #         if epoch >= 100 and abs(nmi[epoch-i] - nmi[epoch-(i+1)]) <= 0.001:
-        #             a = 1
-        #         else:
-        #             a = 0
-        #             break
-        #     if a == 1:
-        #         break
+        nmi.append(normalized_mutual_info_score(t_1_label, t_2_label))
+
 
         # for # of cluster fitting
         pseudolabels_unique = list(set(pseudolabels_2))
@@ -516,26 +403,6 @@ if args.mode == 'train':
             member_[i] = a
         m_list.append(member_)
 
-        '''tsne'''
-        # if epoch % 20 == 0:
-        #     x_embedded = TSNE(n_components=2).fit_transform(features)
-        #     figure, axesSubplot = plt.subplots()
-        #     axesSubplot.scatter(x_embedded[:,0], x_embedded[:,1], c=pseudolabels_2)
-        #     axesSubplot.set_xticks(())
-        #     axesSubplot.set_yticks(())
-        #     feature_tsne_file_name = 'fig%04d.png' %(epoch)
-        #     if not os.path.isdir(results_dir):
-        #         os.makedirs(results_dir)
-        #     plt.savefig(results_dir+'/'+feature_tsne_file_name)
-        #     plt.close()
-        ''''''
-
-        # print('###### Additional info #######')
-        # print('list of nmi: ', nmi[-1])
-        # # print('list of the number of cluster : ', cluster_number)
-        # print('the number of members in each cluster :', member_)
-        # # print('label : ', pseudolabels_2)
-        # print('')
 
 
         # assign pseudo-labels
@@ -841,44 +708,7 @@ if args.mode == 'train':
                 'optimizer': optimizer.state_dict()},
                os.path.join(results_dir, 'checkpoint_epoch%04d.pth.tar' % epoch))
 
-    '''************************* LIME **********************************'''
-    if args.lime:
-        def batch_predict(data):
-            model.eval()
-            batch = torch.stack(tuple(torch.from_numpy(i).float() for i in data), dim=0)
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            model.to(device)
-            batch = batch.to(device)
-            logits = model(batch)
-            probs = F.softmax(logits, dim=1)
-            return probs.detach().cpu().numpy()
 
-        explainer = lime.lime_tabular.LimeTabularExplainer(dataset.x_data.numpy(),
-                                                           discretize_continuous=True)
-        # print(dataset.__getitem__(0))
-        # print(batch_predict([dataset.__getitem__(0).numpy()]).shape)
-        # print(len(test_dataset))
-        # print(dataset.__getitem__(i).numpy().T)
-        for i in range(len(dataset)):
-            if i == 0:
-                exp = explainer.explain_instance(dataset.__getitem__(i).numpy().T,
-                                                 batch_predict, num_samples=100,
-                                                 top_labels=args.num_cluster, num_features=dataset.x_data.numpy().shape[1], repeat=False)
-            else:
-                exp = explainer.explain_instance(dataset.__getitem__(i).numpy().T,
-                                                 batch_predict, num_samples=100,
-                                                 top_labels=args.num_cluster, num_features=dataset.x_data.numpy().shape[1], repeat=True)
-            # print('label:', pseudolabels_2[i])
-            # exp.save_to_file(results_dir + '/lime_test%2d.html' %i)
-            # exp.as_html()
-            # print(exp.available_labels())
-            explanation = []
-            for j in range(args.num_cluster):
-                explanation.append(exp.as_list(label=j))
-
-            explanation = np.array(explanation)
-            #print(explanation, explanation.shape)
-            scipy.io.savemat(results_dir + '/' + 'explanation%03d.mat' % i, {'exp': explanation})
 
 
 elif args.mode == 'test':
