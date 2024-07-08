@@ -1,3 +1,14 @@
+# Copyright (c) 2024, Sohyun Kang
+# All rights reserved.
+
+# This code is part of the research work presented in:
+# "Disentangling brain atrophy heterogeneity in Alzheimer’s disease:
+# a deep self-supervised approach with interpretable latent space" by Sohyun Kang, under-reviewed in Neuroimage, 2024.
+
+
+# This code is based on the implementation of deepcluster by facebookresearch,
+# available at https://github.com/facebookresearch/deepcluster.
+
 import argparse
 import time
 
@@ -65,13 +76,6 @@ def parse_args():
 
 
 def compute_features(dataloader, model, N):
-    """Making latent features for clustering, ( only feed-forward in encoder )
-
-    :param dataloader:  whole data (both train and validation)
-    :param model:       MLP with final classification layer removed
-    :param N:           data length
-    :return:
-    """
     model.eval()
 
     for i, (input_tensor) in enumerate(dataloader):
@@ -278,29 +282,23 @@ if args.mode == 'flatcv':
     # load data
     end = time.time()
     print("loading the dataset...")
-
     dataset = corticaldataset.CorticalDataset(datatype=args.data)
-
     print('Data loading time: {0:.2f} s'.format(time.time() - end))
-    print(dataset.x_data.numpy().mean(), dataset.x_data.numpy().std(ddof=1)) #calculate the mean and standard deviation of whole data
+    dataloader = torch.utils.data.DataLoader(dataset,
+                                             batch_size=args.batch,
+                                             num_workers=args.workers,
+                                             pin_memory=True, )
 
-    """ Train val index """
-
+    # cross-validation
     assert 0 <= args.fold_idx and args.fold_idx < 10
     skf = KFold(n_splits=10, shuffle=True, random_state=args.fold_seed)
     idx_list = []
     for idx in skf.split(np.zeros(len(dataset))):
         idx_list.append(idx)
     train_index, test_index = idx_list[args.fold_idx]
-    # print(train_index.shape, test_index.shape)
-    # print(train_index, test_index, type(train_index), type(test_index))
-    dataloader = torch.utils.data.DataLoader(dataset,
-                                             batch_size=args.batch,
-                                             num_workers=args.workers,
-                                             pin_memory=True, )
 
-    # clustering method selection
-    deepcluster = clustering.__dict__[args.clustering](args.num_cluster)
+    # Gaussian mixture model
+    GMM = clustering.GMM(args.num_cluster)
 
     # train
     losses_t = []
@@ -319,18 +317,16 @@ if args.mode == 'flatcv':
 
     # making top directory's profile and some directories at each implementation
     script_dir = os.path.dirname(__file__)
-    profile = '_%s_%s_%s_%s_ft_%s_%s_k=%d_lr=%f_ep=%d_reassign=%d_fold_idx=%d'\
-                  % (args.no, args.data, args.dx, args.level, bool(args.model), args.clustering, args.num_cluster, args.lr, args.epochs, args.reassign,  args.fold_idx)
+    profile = '_%s_k=%d_lr=%f_ep=%d_reassign=%d_fold_idx=%d'\
+                  % (args.data, args.num_cluster, args.lr, args.epochs, args.reassign,  args.fold_idx)
     results_dir = os.path.join(script_dir, 'Results'+profile)
 
 
     for epoch in range(args.epochs):
         end = time.time()
-        # remove head
         model.top_layer = None
         model.features = nn.Sequential(*list(model.features.children())[:-1])
 
-        # feed-forward mlp before clustering
         features = compute_features(dataloader, model, len(dataset))    # NUMPY format
 
         #print('###### Deep features at Epoch [%d] ###### \n' % epoch, features, features.shape, '\n')
@@ -471,12 +467,6 @@ if args.mode == 'flatcv':
                 model.top_layer = top_layer_tmp
                 model.top_layer.cuda()
 
-        if args.model:
-            tmp = list(model.features.children())
-            tmp.append(nn.ReLU().cuda())
-            model.features = nn.Sequential(*tmp)
-            model.top_layer = top_layer_tmp
-            model.top_layer.cuda()
 
 
         #################################################################
@@ -505,20 +495,12 @@ if args.mode == 'flatcv':
         clustering_losses_train.append(clustering_loss_train)
         clustering_losses_test.append(clustering_loss_test)
 
-        # print log
-        if args.clustering == 'LV':
-            print('###### Epoch [{0}] ###### \n'
-              'Total time: {1:.3f} s\n'
-              'Clustering modularity: {2:.5f} \n'
-              'MLP loss: {3:.3f}'
-              .format(epoch, time.time() - end, clustering_loss_train, loss_t))
-            print('')
-        else:
 
-            print(
-                'Epoch [{0}]| Total time: {1:.2f} s | Train loss: {2:.2f} | Val loss: {3:.2f} | C_train loss: {4: .2f} | C_val loss: {5: .2f} | Train acc: {6: .1f} | Val acc: {7: .1f} | NMI: {8: .1f} | Inclass size: '
-                .format(epoch, time.time() - end,  loss_t, loss_v,
-                        clustering_loss_train, clustering_loss_test, acc_t, acc_v, nmi[-1]), member_)
+
+        print(
+            'Epoch [{0}]| Total time: {1:.2f} s | Train loss: {2:.2f} | Val loss: {3:.2f} | C_train loss: {4: .2f} | C_val loss: {5: .2f} | Train acc: {6: .1f} | Val acc: {7: .1f} | NMI: {8: .1f} | Inclass size: '
+            .format(epoch, time.time() - end,  loss_t, loss_v,
+                    clustering_loss_train, clustering_loss_test, acc_t, acc_v, nmi[-1]), member_)
 
         epoch_last = epoch
 
@@ -544,14 +526,10 @@ if args.mode == 'flatcv':
     plt.ylabel('loss')
     plt.legend()
     file_name = 'loss.png'
-    if not os.path.isdir(loss_dir):
-        os.makedirs(loss_dir)
-    plt.savefig(loss_dir+'/'+file_name)
+
     plt.savefig(results_dir+'/'+file_name)
     plt.close()
-    (pd.DataFrame(np.array(losses_t))).to_csv(loss_dir+'/'+'loss_train%s.csv' %(profile))
     (pd.DataFrame(np.array(losses_t))).to_csv(results_dir+'/'+'loss_train.csv')
-    (pd.DataFrame(np.array(losses_v))).to_csv(loss_dir+'/'+'loss_test%s.csv' %(profile))
     (pd.DataFrame(np.array(losses_v))).to_csv(results_dir+'/'+'loss_test.csv')
 
     # plot the clustering loss curve
@@ -562,14 +540,9 @@ if args.mode == 'flatcv':
     plt.ylabel('loss')
     plt.legend()
     file_name = 'clustering_loss.png'
-    if not os.path.isdir(c_loss_dir):
-        os.makedirs(c_loss_dir)
-    plt.savefig(c_loss_dir+'/'+file_name)
     plt.savefig(results_dir+'/'+file_name)
     plt.close()
-    (pd.DataFrame(np.array(clustering_losses_train))).to_csv(c_loss_dir+'/'+'clustering_loss_train%s.csv' %(profile))
     (pd.DataFrame(np.array(clustering_losses_train))).to_csv(results_dir+'/'+'clustering_loss_train.csv')
-    (pd.DataFrame(np.array(clustering_losses_test))).to_csv(c_loss_dir+'/'+'clustering_loss_test%s.csv' %(profile))
     (pd.DataFrame(np.array(clustering_losses_test))).to_csv(results_dir+'/'+'clustering_loss_test.csv')
 
 
@@ -581,14 +554,9 @@ if args.mode == 'flatcv':
     plt.ylabel('accuracy')
     plt.legend(loc=1)
     file_name = 'acc.png'
-    if not os.path.isdir(acc_dir):
-        os.makedirs(acc_dir)
-    plt.savefig(acc_dir+'/'+file_name)
     plt.savefig(results_dir+'/'+file_name)
     plt.close()
-    (pd.DataFrame(np.array(accs_t))).to_csv(acc_dir+'/'+'acc_train%s.csv' %(profile))
     (pd.DataFrame(np.array(accs_t))).to_csv(results_dir+'/'+'acc_train.csv')
-    (pd.DataFrame(np.array(accs_v))).to_csv(acc_dir+'/'+'acc_test%s.csv' %(profile))
     (pd.DataFrame(np.array(accs_v))).to_csv(results_dir+'/'+'acc_test.csv')
 
 
@@ -618,9 +586,6 @@ if args.mode == 'flatcv':
     plt.legend(loc=1)
 
     file_name = 'members.png'
-    if not os.path.isdir(members_dir):
-        os.makedirs(members_dir)
-    plt.savefig(members_dir+'/'+file_name)
     plt.savefig(results_dir+'/'+file_name)
     plt.close()
 
@@ -632,18 +597,11 @@ if args.mode == 'flatcv':
     plt.ylabel('AMI')
     plt.legend(loc=1)
     file_name = 'ami.png'
-    if not os.path.isdir(nmi_dir):
-        os.makedirs(nmi_dir)
-    plt.savefig(nmi_dir+'/'+file_name)
     plt.savefig(results_dir+'/'+file_name)
     plt.close()
-    (pd.DataFrame(np.array(nmi))).to_csv(nmi_dir + '/' + 'ami%s.csv' % (profile))
     (pd.DataFrame(np.array(nmi))).to_csv(results_dir + '/' + 'ami.csv')
 
     # save the last labels
-    if not os.path.isdir(label_dir):
-        os.makedirs(label_dir)
-    (pd.DataFrame(np.array(pseudolabels_2))).to_csv(label_dir+'/'+'label%s.csv' %(profile))
     (pd.DataFrame(np.array(pseudolabels_2))).to_csv(results_dir+'/'+'label.csv')
     # plot the number of clusters(k) only for louvain method
     if args.clustering == 'LV':
@@ -653,26 +611,16 @@ if args.mode == 'flatcv':
         plt.ylabel('The number of clusters')
         plt.legend(loc=1)
         file_name = 'cluster'+profile+'.png'
-        if not os.path.isdir(clusters_dir):
-            os.makedirs(clusters_dir)
-        plt.savefig(clusters_dir+'/'+file_name)
         plt.savefig(results_dir+'/'+file_name)
         plt.close()
 
         # save convergent Q(modularity)
         convergent_modularity = []
         convergent_modularity.append(sum(clustering_losses_train[-11:-1])/10.0)
-        if not os.path.isdir(convQ_dir):
-            os.makedirs(convQ_dir)
-        (pd.DataFrame(np.array(convergent_modularity))).to_csv(convQ_dir + '/' + 'convQ%s.csv' % (profile))
         (pd.DataFrame(np.array(convergent_modularity))).to_csv(results_dir + '/' + 'convQ.csv')
 
     # save the train and test index
-    if not os.path.isdir(idx_dir):
-        os.makedirs(idx_dir)
-    (pd.DataFrame(np.array(train_index))).to_csv(idx_dir+'/'+'train_idx%s.csv' %(profile))
     (pd.DataFrame(np.array(train_index))).to_csv(results_dir + '/' + 'train_idx.csv')
-    (pd.DataFrame(np.array(test_index))).to_csv(idx_dir+'/'+'test_idx%s.csv' %(profile))
     (pd.DataFrame(np.array(test_index))).to_csv(results_dir + '/' + 'test_idx.csv')
 
 

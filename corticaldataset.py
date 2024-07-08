@@ -9,7 +9,6 @@ def wscore2atrophy(wscore):
     return -wscore
 
 class CorticalDataset(Dataset):
-    """Cortical thickness dataset."""
     def __init__(self, mode='train', datatype='ADNI'):
         self.mode = mode
         self.seed = 31
