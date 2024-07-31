@@ -8,65 +8,22 @@ import torch.utils.data as data
 class ReassignedDataset(data.Dataset):
     """A dataset where the new images labels are given in argument.
     Args:
-        image_indexes (list): list of data indexes
-        pseudolabels (list): list of labels for each data
-        dataset (list): list of tuples with paths to images
-        transform (callable, optional): a function/transform that takes in
-                                        an PIL image and returns a
-                                        transformed version
-    """
-
-    def __init__(self, image_indexes, pseudolabels, dataset, transform=None):
-        self.imgs = self.make_dataset(image_indexes, pseudolabels, dataset)
-        self.transform = transform
-        self.len = len(self.imgs)
-
-    def make_dataset(self, image_indexes, pseudolabels, dataset):
-        label_to_idx = {label: idx for idx, label in enumerate(set(pseudolabels))}
-        # print(label_to_idx)
-        images = []
-        for j, idx in enumerate(image_indexes):
-            img = dataset[idx]
-            pseudolabel = label_to_idx[pseudolabels[j]]
-            images.append((img, pseudolabel))
-        # print(images, len(images))
-        return images
-
+        dataset (array): array of atrophy
+        pseudolabels (list): list of labels for whole dataset
+        """
+    def __init__(self, dataset, pseudolabels):
+        self.data = self.make_dataset(dataset, pseudolabels)
+        self.len = len(self.data)
+    def make_dataset(self, dataset, pseudolabels):
+        data = []
+        for img, pseudolabel in zip(dataset, pseudolabels):
+            data.append((img, pseudolabel))
+        return data
     def __getitem__(self, index):
-        """
-        Args:
-            index (int): index of data
-        Returns:
-            tuple: (image, pseudolabel) where pseudolabel is the cluster of index datapoint
-        """
-        data, pseudolabel = self.imgs[index]
-
-        return [data, pseudolabel]
-
+        img, pseudolabel = self.data[index]
+        return [img, pseudolabel]
     def __len__(self):
         return self.len
-
-def cluster_assign(images_lists, dataset):
-    """Creates a dataset from clustering, with clusters as labels.
-    Args:
-        images_lists (list of list): for each cluster, the list of image indexes
-                                    belonging to this cluster
-        dataset (list): initial dataset
-    Returns:
-        ReassignedDataset(torch.utils.data.Dataset): a dataset with clusters as
-                                                     labels
-    """
-    assert images_lists is not None
-    pseudolabels = []
-    image_indexes = []
-    for cluster, images in enumerate(images_lists):
-        image_indexes.extend(images)
-        pseudolabels.extend([cluster] * len(images))
-    # print(pseudolabels)
-    t = transforms.Compose([transforms.ToTensor,
-                              transforms.Normalize([2.20], [0.84])])
-
-    return ReassignedDataset(image_indexes, pseudolabels, dataset, t)
 
 
 def arrange_clustering(images_lists):

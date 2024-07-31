@@ -13,36 +13,21 @@ import argparse
 import time
 import network
 import clustering
-from util import label_stab, UnifLabelSampler, load_model
-from itertools import permutations
-
-import scipy.io
-from sklearn.metrics import normalized_mutual_info_score
+from util import label_stab, UnifLabelSampler, AverageMeter, plotandsave, load_model
 from sklearn.metrics import adjusted_mutual_info_score
-from sklearn.manifold import TSNE
 from sklearn.model_selection import KFold
-
 import numpy as np
 import pandas as pd
 import random
 import torch
 import torch.nn as nn
 import torch.nn.parallel
-import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 import torch.optim
 import torch.utils.data
 import torchvision.transforms as transforms
 import corticaldataset
-import csv
-
-
-
-import matplotlib.pyplot as plt
 import os
-
-import copy
-import scipy.io as sio
 
 def parse_args():
     parser = argparse.ArgumentParser(description='PyTorch Implemenation of Subtyping with DeepCluster')
@@ -92,7 +77,7 @@ def compute_features(dataloader, model, N):
     return features
 
 def train(loader, model, crit, opt):
-    """Training of the CNN.
+    """Training of the MLP.
         Args:
             loader (torch.utils.data.DataLoader): Data loader
             model (nn.Module): mlp
@@ -101,9 +86,7 @@ def train(loader, model, crit, opt):
                                    requires_grad in model except top layer
             epoch (int)
     """
-
     model.train()
-
     # create an optimizer for the last fc layer
     optimizer_tl = torch.optim.SGD(
         model.top_layer.parameters(),
@@ -127,59 +110,36 @@ def train(loader, model, crit, opt):
 
         torch.cuda.memory_allocated()
 
-def feedforward(loader, model, crit=None):
-    """Training of the CNN.
+def feedforward(loader, model, crit):
+    """Training of the MLP.
         Args:
             loader (torch.utils.data.DataLoader): Data loader
-            model (nn.Module): CNN
+            model (nn.Module): mlp
             crit (torch.nn): loss
-            opt (torch.optim.SGD): optimizer for every parameters with True
-                                   requires_grad in model except top layer
-            epoch (int)
     """
-    batch_time = AverageMeter()
     losses = AverageMeter()
-    data_time = AverageMeter()
-    forward_time = AverageMeter()
-    backward_time = AverageMeter()
-
-
     # switch to train mode
     model.eval()
-
-
-    end = time.time()
     total = 0
     correct = 0
     for i, (input_tensor, target) in enumerate(loader):
-        data_time.update(time.time() - end)
-
         target = target.cuda()
         input_var = torch.autograd.Variable(input_tensor.cuda())
         target_var = torch.autograd.Variable(target)
         output = model(input_var)
         if i == 0:
             outputs = output
-            targets = target
         else:
             outputs = torch.cat((outputs, output), dim=0)
-            targets = torch.cat((targets, target), dim=0)
-
         loss = crit(output, target_var)
-
         _, predicted = torch.max(output, 1)
         total += target.size(0)
         correct += (predicted == target_var).sum().item()
         # record loss
         losses.update(loss.item(), input_tensor.size(0))
-
-
-        # measure elapsed time
-        batch_time.update(time.time() - end)
-        end = time.time()
         torch.cuda.memory_allocated()
 
-    return losses.avg,  100*correct/total, outputs, targets
+    return losses.avg,  100*correct/total, outputs
 
 
 def test_(loader, model):
@@ -307,7 +267,7 @@ if args.mode == 'flatcv':
         'val_ami': [],
         'features': {},    # epoch x subject x latent dim
         'labels': {},      # epoch x subject x 1
-        'predictions': {}, # epoch x subject x clusters
+        'val_predictions': {},  # epoch x subject x clusters
     }
 
     script_dir = os.path.dirname(__file__)
@@ -335,45 +295,33 @@ if args.mode == 'flatcv':
         # label stabilization for calculating accuracy
         label_now, images_lists_now = label_stab(images_lists_unmatched, images_lists_prev, label_unmatched)
 
-        results['features'][f'epoch_{epoch + 1}'].pseudolabels.append(features)
-        results['labels'][f'epoch_{epoch+1}'].pseudolabels.append(label_now)
+        results['features'][f'epoch_{epoch + 1}'].append(features)
+        results['labels'][f'epoch_{epoch+1}'].append(label_now)
+
+        train_ami = adjusted_mutual_info_score(label_prev[train_index], label_now[train_index])
+        val_ami = adjusted_mutual_info_score(label_prev[test_index], label_now[test_index])
+        results['train_ami'].append(train_ami)
+        results['val_ami'].append(val_ami)
+
 
         # assign pseudo-labels
-        t_2_images_lists_train = copy.deepcopy(images_lists_now)
-        t_2_images_lists_test = [[] for i in range(len(t_2_images_lists_train))]
-        t_2_images_lists_test_comp = [[] for i in range(len(t_2_images_lists_train))]
-        t_2_images_lists_train_comp = [[] for i in range(len(t_2_images_lists_train))]
-        """Segregation of
-        train and test dataset"""
-        for i, idx in enumerate(test_index):
-            for label in range(len(t_2_images_lists_train)):
-                if idx in t_2_images_lists_train[label]:
-                    t_2_images_lists_train[label].remove(idx)
-                    t_2_images_lists_test[label].append(idx)
-                    t_2_images_lists_test_comp[label].append(i)
-        for i, idx in enumerate(train_index):
-            for label in range(len(t_2_images_lists_train)):
-                if idx in t_2_images_lists_train[label]:
-                    t_2_images_lists_train_comp[label].append(i)
-
-
-        # print(t_2_images_lists_train, len(t_2_images_lists_train))
-        # print(t_2_images_lists_test, len(t_2_images_lists_test))
-        # print(t_2_images_lists_train_comp, len(t_2_images_lists_train_comp))
-        # print(t_2_images_lists_test_comp, len(t_2_images_lists_test_comp))
-
-        train_dataset = clustering.cluster_assign(t_2_images_lists_train_comp,
-                                                 dataset.x_data.numpy()[train_index])
-        test_dataset = clustering.cluster_assign(t_2_images_lists_test_comp,
-                                                 dataset.x_data.numpy()[test_index])
-        # print(train_dataset, len(train_dataset))
+        train_dataset = clustering.ReassignedDataset(dataset.x_data.numpy()[train_index],
+                                                     label_now[train_index])
+        test_dataset = clustering.ReassignedDataset(dataset.x_data.numpy()[test_index],
+                                                    label_now[test_index])
 
         # sampler
+        images_lists_train_abs = [[] for i in range(len(images_lists_now))]
+        images_lists_test_abs = [[] for i in range(len(images_lists_now))]
+        train_index = list(set(train_index))
+        test_index = list(set(test_index))
+        for label, image_list in enumerate(images_lists_now):
+            images_lists_train_abs[label] = [i for i, idx in enumerate(train_index) if idx in image_list]
+            images_lists_test_abs[label] = [i for i, idx in enumerate(test_index) if idx in image_list]
+        train_sampler = UnifLabelSampler(int(args.reassign * len(train_dataset)), images_lists_train_abs)
+        test_sampler = UnifLabelSampler(int(args.reassign * len(test_dataset)), images_lists_test_abs)
 
-        train_sampler = UnifLabelSampler(int(args.reassign*len(train_dataset)), t_2_images_lists_train_comp)
-        test_sampler = UnifLabelSampler(int(args.reassign * len(test_dataset)), t_2_images_lists_test_comp)
-
-        # Load pseudo-labeled datasets
+        # Load pseudo-labeled train and test datasets
         train_dataloader = torch.utils.data.DataLoader(
             train_dataset,
             batch_size=args.batch,
@@ -385,211 +333,44 @@ if args.mode == 'flatcv':
             test_dataset,
             batch_size=args.batch,
             num_workers=args.workers,
-            # sampler=test_sampler,
             pin_memory=True)
 
         # set top_layer
-        if not args.model:
-            tmp = list(model.features.children())
-            tmp.append(nn.ReLU().cuda())
-            model.features = nn.Sequential(*tmp)
-            if epoch == 0:
-                model.top_layer = nn.Linear(fd, len(t_2_images_lists))
-                model.top_layer.weight.data.normal_(0, 0.01)
-                model.top_layer.bias.data.zero_()
-                model.top_layer.cuda()
-            else:
-                model.top_layer = top_layer_tmp
-                model.top_layer.cuda()
+        tmp = list(model.features.children())
+        tmp.append(nn.ReLU().cuda())
+        model.features = nn.Sequential(*tmp)
+        if epoch == 0:
+            model.top_layer = nn.Linear(fd, len(images_lists_now))
+            model.top_layer.weight.data.normal_(0, 0.01)
+            model.top_layer.bias.data.zero_()
+            model.top_layer.cuda()
+        else:
+            model.top_layer = top_layer_tmp
+            model.top_layer.cuda()
 
-
-
-        #################################################################
-        ########## train network with clusters as pseudo-labels #########
-        #################################################################
         loss_t = train(train_dataloader, model, criterion, optimizer)
         top_layer_tmp = model.top_layer
-        train_dataloader = torch.utils.data.DataLoader(
+        train_dataloader_wo_sampling = torch.utils.data.DataLoader(
             train_dataset,
             batch_size=args.batch,
             num_workers=args.workers,
             pin_memory=True)
-        loss_t, acc_t, output_train, target_train = feedforward(train_dataloader, model, criterion)
-        loss_v, acc_v, output_test, target_test = feedforward(test_dataloader, model, criterion)
-        print(target_test.shape)
-        outputs.append(output_test.cpu().detach().numpy())
 
-        targets.append(target_test.cpu().detach().numpy())
+        loss_t, acc_t, output_train = feedforward(train_dataloader_wo_sampling, model, criterion)
+        loss_v, acc_v, output_test = feedforward(test_dataloader, model, criterion)
 
-
-
-        losses_t.append(loss_t)
-        losses_v.append(loss_v)
-        accs_t.append(acc_t)
-        accs_v.append(acc_v)
-        clustering_losses_train.append(clustering_loss_train)
-        clustering_losses_test.append(clustering_loss_test)
-
-
+        results['train_loss'].append(loss_t)
+        results['train_accuracy'].append(acc_t)
+        results['test_loss'].append(loss_v)
+        results['test_accuracy'].append(acc_v)
+        results['val_predictions'][f'epoch_{epoch + 1}'].append(output_test)
 
         print(
-            'Epoch [{0}]| Total time: {1:.2f} s | Train loss: {2:.2f} | Val loss: {3:.2f} | C_train loss: {4: .2f} | C_val loss: {5: .2f} | Train acc: {6: .1f} | Val acc: {7: .1f} | NMI: {8: .1f} | Inclass size: '
+            'Epoch [{0}]| Total time: {1:.2f} s | Train loss: {2:.2f} | Val loss: {3:.2f} | Train acc: {4: .1f} | Val acc: {5: .1f} | Train AMI: {6: .1f} | Val AMI: {7: .1f} | Inclass size: '
             .format(epoch, time.time() - end,  loss_t, loss_v,
-                    clustering_loss_train, clustering_loss_test, acc_t, acc_v, nmi[-1]), [len(x) for x in label_now])
+                    acc_t, acc_v, train_ami, val_ami), [len(x) for x in label_now])
 
-        epoch_last = epoch
-
-
-    '''*************************** PLOTTING **************************'''
-    # plot the last t-SNE
-    x_embedded = TSNE(n_components=2).fit_transform(features)
-    figure, axesSubplot = plt.subplots()
-    axesSubplot.scatter(x_embedded[:,0], x_embedded[:,1], c=pseudolabels_2)
-    axesSubplot.set_xticks(())
-    axesSubplot.set_yticks(())
-    feature_tsne_file_name = 'fig%04d.png' %(epoch_last)
-    if not os.path.isdir(results_dir):
-        os.makedirs(results_dir)
-    plt.savefig(results_dir+'/'+feature_tsne_file_name)
-    plt.close()
-
-    # plot the loss(or modularity, Q) curve
-    plt.figure()
-    plt.plot(losses_t, 'y', label='train_loss')
-    plt.plot(losses_v, 'r', label='test_loss')
-    plt.xlabel('epoch')
-    plt.ylabel('loss')
-    plt.legend()
-    file_name = 'loss.png'
-
-    plt.savefig(results_dir+'/'+file_name)
-    plt.close()
-    (pd.DataFrame(np.array(losses_t))).to_csv(results_dir+'/'+'loss_train.csv')
-    (pd.DataFrame(np.array(losses_v))).to_csv(results_dir+'/'+'loss_test.csv')
-
-    # plot the clustering loss curve
-    plt.figure()
-    plt.plot(clustering_losses_train, 'y', label='clustering_train_ll')
-    plt.plot(clustering_losses_test, 'r', label='clustering_test_ll')
-    plt.xlabel('epoch')
-    plt.ylabel('loss')
-    plt.legend()
-    file_name = 'clustering_loss.png'
-    plt.savefig(results_dir+'/'+file_name)
-    plt.close()
-    (pd.DataFrame(np.array(clustering_losses_train))).to_csv(results_dir+'/'+'clustering_loss_train.csv')
-    (pd.DataFrame(np.array(clustering_losses_test))).to_csv(results_dir+'/'+'clustering_loss_test.csv')
-
-
-    # plot the accuracy curve
-    plt.figure()
-    plt.plot(accs_t, 'y', label='train_accs')
-    plt.plot(accs_v, 'r', label='test_accs')
-    plt.xlabel('epoch')
-    plt.ylabel('accuracy')
-    plt.legend(loc=1)
-    file_name = 'acc.png'
-    plt.savefig(results_dir+'/'+file_name)
-    plt.close()
-    (pd.DataFrame(np.array(accs_t))).to_csv(results_dir+'/'+'acc_train.csv')
-    (pd.DataFrame(np.array(accs_v))).to_csv(results_dir+'/'+'acc_test.csv')
-
-
-    # plot the number of members in each cluster
-    c = []
-    max=  0
-    for i in range(len(m_list)):
-        if i == 0:
-            max = len(m_list[i])
-        else:
-            if len(m_list[i]) > max:
-                max = len(m_list[i])
-    for i in range(max):
-        c.append([])
-    for j in range(len(m_list)):
-        for i in range(max):
-            if len(m_list[j]) < max:
-                c[i].append(0)
-            else:
-                c[i].append(m_list[j][i])
-    plt.figure()
-    clr = ['r','b','y','g','c','m','k','w']*1000
-    for i in range(len(m_list[0])):
-            plt.plot(c[i], color=clr[i])
-    plt.xlabel('epoch')
-    plt.ylabel('# of members')
-    plt.legend(loc=1)
-
-    file_name = 'members.png'
-    plt.savefig(results_dir+'/'+file_name)
-    plt.close()
-
-    # plot the nmi(or ami)
-    nmi[0] = 0
-    plt.figure()
-    plt.plot(nmi, label='AMI')
-    plt.xlabel('epoch')
-    plt.ylabel('AMI')
-    plt.legend(loc=1)
-    file_name = 'ami.png'
-    plt.savefig(results_dir+'/'+file_name)
-    plt.close()
-    (pd.DataFrame(np.array(nmi))).to_csv(results_dir + '/' + 'ami.csv')
-
-    # save the last labels
-    (pd.DataFrame(np.array(pseudolabels_2))).to_csv(results_dir+'/'+'label.csv')
-    # plot the number of clusters(k) only for louvain method
-    if args.clustering == 'LV':
-        plt.figure()
-        plt.plot(cluster_number, label='The number of clusters')
-        plt.xlabel('epoch')
-        plt.ylabel('The number of clusters')
-        plt.legend(loc=1)
-        file_name = 'cluster'+profile+'.png'
-        plt.savefig(results_dir+'/'+file_name)
-        plt.close()
-
-        # save convergent Q(modularity)
-        convergent_modularity = []
-        convergent_modularity.append(sum(clustering_losses_train[-11:-1])/10.0)
-        (pd.DataFrame(np.array(convergent_modularity))).to_csv(results_dir + '/' + 'convQ.csv')
-
-    # save the train and test index
-    (pd.DataFrame(np.array(train_index))).to_csv(results_dir + '/' + 'train_idx.csv')
-    (pd.DataFrame(np.array(test_index))).to_csv(results_dir + '/' + 'test_idx.csv')
-
-
-    save_dict = {
-        'pseudolabels' : np.array(pseudolabels)
-    }
-    sio.savemat(results_dir+'/'+'pseudolabels.mat', save_dict)
-    print(np.concatenate(targets, axis=0).T)
-    output_dict = {
-        'outputs' : np.reshape(np.concatenate(outputs, axis=0), (args.epochs, len(test_index), args.num_cluster))
-    }
-    sio.savemat(results_dir+'/'+'outputs.mat', output_dict)
-
-    target_dict = {
-        'labels': np.reshape(np.concatenate(targets, axis=0).T, (args.epochs, len(test_index)))
-    }
-    sio.savemat(results_dir + '/' + 'labels.mat', target_dict)
-
-    savedict = {
-            'clus_features': np.array(clus_features)
-        }
-    sio.savemat(results_dir+'/'+'clus_features.mat', savedict)
-
-
-    save_gm_params = {
-        'gm_params' : np.array(params)
-    }
-    sio.savemat(results_dir+'/'+'gm_params.mat', save_gm_params)
-
-    torch.save({'epoch': epoch,
-                'arch': args.arch,
-                'state_dict': model.state_dict(),
-                'optimizer': optimizer.state_dict()},
-               os.path.join(results_dir, 'checkpoint_epoch%04d.pth.tar' % epoch))
+    plotandsave()
 
 
 
