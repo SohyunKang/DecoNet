@@ -4,6 +4,7 @@ This repository contains the code and data associated with the publication:
 
 **[Disentangling brain atrophy heterogeneity in Alzheimer's disease: A deep self-supervised approach with interpretable latent space](https://doi.org/10.1016/j.neuroimage.2024.120737)**
 
+![Framework Architecture](thumbnails.png)
 Authors: Sohyun Kang, Sung-Woo Kim, Joon-Kyung Seong
 
 Published in: *Neuroimage*, 2024
