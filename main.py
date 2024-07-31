@@ -3,7 +3,7 @@
 
 # This code is part of the research work presented in:
 # "Disentangling brain atrophy heterogeneity in Alzheimer’s disease:
-# a deep self-supervised approach with interpretable latent space" by Sohyun Kang, under-reviewed in Neuroimage, 2024.
+# a deep self-supervised approach with interpretable latent space" by Sohyun Kang, published in Neuroimage, 2024.
 
 
 # This code is based on the implementation of deepcluster by facebookresearch,
@@ -11,6 +11,10 @@
 
 import argparse
 import time
+import network
+import clustering
+from util import label_stab, UnifLabelSampler, load_model
+from itertools import permutations
 
 import scipy.io
 from sklearn.metrics import normalized_mutual_info_score
@@ -30,16 +34,13 @@ import torch.optim
 import torch.utils.data
 import torchvision.transforms as transforms
 import corticaldataset
+import csv
 
 
-import network
-import clustering
 
-from util import AverageMeter, UnifLabelSampler, load_model
 import matplotlib.pyplot as plt
 import os
 
-from itertools import permutations
 import copy
 import scipy.io as sio
 
@@ -77,21 +78,17 @@ def parse_args():
 
 def compute_features(dataloader, model, N):
     model.eval()
-
     for i, (input_tensor) in enumerate(dataloader):
         input_var = input_tensor.to(torch.device('cuda'))
         aux = model(input_var).data.cpu().numpy()
-
         if i == 0:
             features = np.zeros((N, aux.shape[1]), dtype='float32')
         aux = aux.astype('float32')
-
         if i < len(dataloader) - 1:
             features[i * args.batch: (i + 1) * args.batch] = aux
         else:
             # special treatment for final batch
             features[i * args.batch:] = aux
-
     return features
 
 def train(loader, model, crit, opt):
@@ -301,115 +298,53 @@ if args.mode == 'flatcv':
     GMM = clustering.GMM(args.num_cluster)
 
     # train
-    losses_t = []
-    losses_v = []
-    accs_t = []
-    accs_v = []
-    clustering_losses_train = []
-    clustering_losses_test = []
-    m_list = []
-    nmi = []
-    cluster_number = []
-    pseudolabels = []
-    outputs = []
-    targets = []
-    clus_features = []
+    results = {
+        'train_loss': [],
+        'train_accuracy': [],
+        'train_ami': [],
+        'val_loss': [],
+        'val_accuracy': [],
+        'val_ami': [],
+        'features': {},    # epoch x subject x latent dim
+        'labels': {},      # epoch x subject x 1
+        'predictions': {}, # epoch x subject x clusters
+    }
 
-    # making top directory's profile and some directories at each implementation
     script_dir = os.path.dirname(__file__)
     profile = '_%s_k=%d_lr=%f_ep=%d_reassign=%d_fold_idx=%d'\
                   % (args.data, args.num_cluster, args.lr, args.epochs, args.reassign,  args.fold_idx)
     results_dir = os.path.join(script_dir, 'Results'+profile)
 
-
     for epoch in range(args.epochs):
         end = time.time()
         model.top_layer = None
-        model.features = nn.Sequential(*list(model.features.children())[:-1])
-
+        model.features = nn.Sequential(*list(model.features.children())[:-1]) # what for?
         features = compute_features(dataloader, model, len(dataset))    # NUMPY format
 
-        #print('###### Deep features at Epoch [%d] ###### \n' % epoch, features, features.shape, '\n')
-        clus_features.append(features)
-        # for mni
-
-        if epoch != 0:
-            t_1_label = t_2_label
-            t_1_images_lists = t_2_images_lists
-
         # cluster the features
-        pseudolabels_unsorted, clustering_loss_train, clustering_loss_test, params = deepcluster.cluster(features, train_index, test_index)
+        label_unmatched, gmm_params = GMM.cluster(features, train_index, test_index)
+        images_lists_unmatched = GMM.images_lists
 
         if epoch == 0:
-            t_1_label = pseudolabels_unsorted
-            t_1_images_lists = deepcluster.images_lists
-
-
-        t_2_label = pseudolabels_unsorted
+            label_prev = label_unmatched
+            images_lists_prev = images_lists_unmatched
+        else:
+            label_prev = label_now
+            images_lists_prev = images_lists_now
 
         # label stabilization for calculating accuracy
-        a = list(range(len(deepcluster.images_lists)))
-        permute = list(permutations(a, len(deepcluster.images_lists)))
-        # print(permute)
-        num_same_subject = [0]*len(permute)
-        for i in range(len(permute)):
-            t_2_images_lists = [[] for x in range(len(deepcluster.images_lists))]
-            for j in range(len(permute[i])):
-                t_2_images_lists[j] = deepcluster.images_lists[permute[i][j]]
-            # print(t_2_images_lists)
-            for k in range(len(permute[i])):
-                num_same_subject[i] += len(set(t_1_images_lists[k]) & set(t_2_images_lists[k]))
-                # print(num_same_subject)
-        # print(num_same_subject)
-        idx = int(np.argmax(np.array(num_same_subject)))
-        # print(idx)
-        t_2_images_lists = [[] for x in range(len(deepcluster.images_lists))]
-        for j in range(len(permute[idx])):
-            t_2_images_lists[j] = deepcluster.images_lists[permute[idx][j]]
-        # print(t_1_images_lists, t_2_images_lists)
+        label_now, images_lists_now = label_stab(images_lists_unmatched, images_lists_prev, label_unmatched)
 
-        pseudolabels_2 = [0]*len(pseudolabels_unsorted)
-        for j in range(len(t_2_images_lists)):
-            for i in range(len(t_2_images_lists[j])):
-                pseudolabels_2[t_2_images_lists[j][i]] = j
-        t_2_label = pseudolabels_2
-
-        pseudolabels.append(pseudolabels_2)
-
-
-        nmi.append(normalized_mutual_info_score(t_1_label, t_2_label))
-
-
-        # for # of cluster fitting
-        pseudolabels_unique = list(set(pseudolabels_2))
-        # if epoch == 0:
-        #     the_number_of_first_cluster = len(pseudolabels_unique)
-        # else:
-        #     if len(pseudolabels_unique) > the_number_of_first_cluster:
-        #         the_number_of_first_cluster = len(pseudolabels_2)
-        # member_ = [0] * the_number_of_first_cluster
-        member_ = [0] * args.num_cluster
-        cluster_number.append(len(pseudolabels_unique))
-        # for # of members fitting
-        # print(len(pseudolabels_unique))
-        for i in range(len(pseudolabels_unique)):
-            a = pseudolabels_2.count(i)
-            # print(pseudolabels_2)
-            # print(a)
-            member_[i] = a
-        m_list.append(member_)
-
-
+        results['features'][f'epoch_{epoch + 1}'].pseudolabels.append(features)
+        results['labels'][f'epoch_{epoch+1}'].pseudolabels.append(label_now)
 
         # assign pseudo-labels
-        # print(t_2_images_lists)
-        t_2_images_lists_train = copy.deepcopy(t_2_images_lists)
+        t_2_images_lists_train = copy.deepcopy(images_lists_now)
         t_2_images_lists_test = [[] for i in range(len(t_2_images_lists_train))]
         t_2_images_lists_test_comp = [[] for i in range(len(t_2_images_lists_train))]
         t_2_images_lists_train_comp = [[] for i in range(len(t_2_images_lists_train))]
         """Segregation of
         train and test dataset"""
-
         for i, idx in enumerate(test_index):
             for label in range(len(t_2_images_lists_train)):
                 if idx in t_2_images_lists_train[label]:
@@ -500,7 +435,7 @@ if args.mode == 'flatcv':
         print(
             'Epoch [{0}]| Total time: {1:.2f} s | Train loss: {2:.2f} | Val loss: {3:.2f} | C_train loss: {4: .2f} | C_val loss: {5: .2f} | Train acc: {6: .1f} | Val acc: {7: .1f} | NMI: {8: .1f} | Inclass size: '
             .format(epoch, time.time() - end,  loss_t, loss_v,
-                    clustering_loss_train, clustering_loss_test, acc_t, acc_v, nmi[-1]), member_)
+                    clustering_loss_train, clustering_loss_test, acc_t, acc_v, nmi[-1]), [len(x) for x in label_now])
 
         epoch_last = epoch
 

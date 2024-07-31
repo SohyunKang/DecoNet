@@ -2,8 +2,49 @@ import time
 from sklearn import mixture
 import numpy as np
 import torchvision.transforms as transforms
+import torch.utils.data as data
 
 
+class ReassignedDataset(data.Dataset):
+    """A dataset where the new images labels are given in argument.
+    Args:
+        image_indexes (list): list of data indexes
+        pseudolabels (list): list of labels for each data
+        dataset (list): list of tuples with paths to images
+        transform (callable, optional): a function/transform that takes in
+                                        an PIL image and returns a
+                                        transformed version
+    """
+
+    def __init__(self, image_indexes, pseudolabels, dataset, transform=None):
+        self.imgs = self.make_dataset(image_indexes, pseudolabels, dataset)
+        self.transform = transform
+        self.len = len(self.imgs)
+
+    def make_dataset(self, image_indexes, pseudolabels, dataset):
+        label_to_idx = {label: idx for idx, label in enumerate(set(pseudolabels))}
+        # print(label_to_idx)
+        images = []
+        for j, idx in enumerate(image_indexes):
+            img = dataset[idx]
+            pseudolabel = label_to_idx[pseudolabels[j]]
+            images.append((img, pseudolabel))
+        # print(images, len(images))
+        return images
+
+    def __getitem__(self, index):
+        """
+        Args:
+            index (int): index of data
+        Returns:
+            tuple: (image, pseudolabel) where pseudolabel is the cluster of index datapoint
+        """
+        data, pseudolabel = self.imgs[index]
+
+        return [data, pseudolabel]
+
+    def __len__(self):
+        return self.len
 
 def cluster_assign(images_lists, dataset):
     """Creates a dataset from clustering, with clusters as labels.
@@ -40,19 +81,19 @@ def arrange_clustering(images_lists):
 
 def run_gmm(x, train_idx, test_idx, k):
     clf = mixture.GaussianMixture(n_components=k, covariance_type='full')
-    cluster_array = np.ones((len(x)))
+    label_array = np.ones((len(x)))
+    # train gmm: only using train dataset
     clf.fit(x[train_idx])
-    cluster_train = clf.predict(x[train_idx])
-    cluster_test = clf.predict(x[test_idx])
-    ll_train = clf.score(x[train_idx])
-    ll_test = clf.score(x[test_idx])
-    params = {}
-    params['weights'] = clf.weights_
-    params['means'] = clf.means_
-    params['cov'] = clf.covariances_
-    cluster_array[train_idx] = list(cluster_train)
-    cluster_array[test_idx] = list(cluster_test)
-    return cluster_array, ll_train, ll_test, params
+    label_train = clf.predict(x[train_idx])
+    label_test = clf.predict(x[test_idx])
+    gmm_params = {
+        'weights': clf.weights_,
+        'means': clf.means_,
+        'cov': clf.covariances_
+    }
+    label_array[train_idx] = list(label_train)
+    label_array[test_idx] = list(label_test)
+    return label_array, gmm_params
 
 
 class GMM(object):
@@ -60,13 +101,13 @@ class GMM(object):
         self.k = k
 
     def cluster(self, data, train_idx, test_idx):
-        """Performs k-means clustering.
+        """Performs Gaussian Mixture Model-based clustering.
             Args:
-                x_data (np.array N * dim): data to cluster
+                data (np.array N * dim): data to cluster
         """
-        I, loss_train, loss_test, params = run_gmm(data, train_idx, test_idx, self.k)
+        label_array, params = run_gmm(data, train_idx, test_idx, self.k)
         self.images_lists = [[] for i in range(self.k)]
         for i in range(len(data)):
-            self.images_lists[int(I[i])].append(i)
+            self.images_lists[int(label_array[i])].append(i)
 
-        return I, loss_train, loss_test, params
+        return label_array, params
