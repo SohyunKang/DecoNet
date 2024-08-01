@@ -64,3 +64,38 @@ To run the main analysis:
 
 ```bash
 python src/main_script.py
+```
+
+## Repository Structure
+- `data/`: Data files
+- `final/`: Final model
+- `img/`: Project overview images
+- `src/`: Source code
+- `README.md`: Project documentation
+
+## Citation
+If you use this code or dataset in your research, please cite the following publication:
+
+```bash
+@article{kang2024disentangling,
+  title={Disentangling brain atrophy heterogeneity in Alzheimer's disease: a deep self-supervised approach with interpretable latent space},
+  author={Kang, Sohyun and Kim, Sung-Woo and Seong, Joon-Kyung and Alzheimer's Disease Neuroimaging Initiative and others},
+  journal={NeuroImage},
+  pages={120737},
+  year={2024},
+  publisher={Elsevier}
+}
+```
+
+## License
+
+
+## Acknowledgments
+Funding sources
+Collaborators
+Contributors
+
+## Contact
+For questions or issues, please contact:
+
+Sohyun Kang - fjqmfl5676@korea.ac.kr
