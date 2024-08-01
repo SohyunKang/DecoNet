@@ -42,3 +42,60 @@ This repository contains the code for our deep self-supervised learning framewor
 
 - Simultaneous atrophy feature extraction, clustering, and classification.
 - Effective disentanglement of disease heterogeneity into key dimensions, progreesion and subtypes, in the latent space.
+
+## Installation
+
+1. **Clone the repository**:
+
+    ```bash
+    git clone https://github.com/SohyunKang/DebaNet.git
+    cd DebaNet
+    ```
+
+2. **Install the required packages**:
+
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+## Usage
+
+To run the main analysis:
+
+```bash
+python src/main_script.py
+```
+
+## Repository Structure
+- `data/`: Data files
+- `final/`: Final model
+- `img/`: Project overview images
+- `src/`: Source code
+- `README.md`: Project documentation
+
+## Citation
+If you use this code or dataset in your research, please cite the following publication:
+
+```bash
+@article{kang2024disentangling,
+  title={Disentangling brain atrophy heterogeneity in Alzheimer's disease: a deep self-supervised approach with interpretable latent space},
+  author={Kang, Sohyun and Kim, Sung-Woo and Seong, Joon-Kyung and Alzheimer's Disease Neuroimaging Initiative and others},
+  journal={NeuroImage},
+  pages={120737},
+  year={2024},
+  publisher={Elsevier}
+}
+```
+
+## License
+
+
+## Acknowledgments
+Funding sources
+Collaborators
+Contributors
+
+## Contact
+For questions or issues, please contact:
+
+Sohyun Kang - fjqmfl5676@korea.ac.kr
