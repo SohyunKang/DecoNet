@@ -76,7 +76,7 @@ python src/main_script.py
 ## Citation
 If you use this code or dataset in your research, please cite the following publication:
 
-```bash
+```scss
 @article{kang2024disentangling,
   title={Disentangling brain atrophy heterogeneity in Alzheimer's disease: a deep self-supervised approach with interpretable latent space},
   author={Kang, Sohyun and Kim, Sung-Woo and Seong, Joon-Kyung and Alzheimer's Disease Neuroimaging Initiative and others},

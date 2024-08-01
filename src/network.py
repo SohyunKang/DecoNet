@@ -1,15 +1,9 @@
-import math
-
-import numpy as np
-import torch
+# decoding process should be added
 import torch.nn as nn
 
 
-# (number of input_node, output_node)
-num_nodes = [(256, 128), (128, 64), (64, 16), (16, 0)]
-DECODER = {
-    'same': [(64, 128), (128, 256), (256, 1193), (1193, 0)]
-}
+# number of input_node
+num_nodes = [256, 128, 64, 16]
 
 class MLP(nn.Module):
     def __init__(self, features, num_classes, decoding=False):
@@ -19,36 +13,10 @@ class MLP(nn.Module):
         self.top_layer = nn.Linear(latent_dim, num_classes)
         self._initialize_weights()
         self.decoding = decoding
-        # train or val
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 68),
-            nn.Tanh())
-        # test
-        # self.decoder = make_layers_features(DECODER['same'], 16, bn=True)
-        # self.decoder = self.decoder[:-2]
 
     def forward(self, x):
-        # test
-        # # x = self.features(x)
-        # if self.top_layer and self.decoder:
-        #     y2 = self.decoder(x)
-        #     return y2
-        # elif self.top_layer and not self.decoder:
-        #     y1 = self.top_layer(x)
-        #     return y1
-        # else:
-        #     return x
-
         # original
         x = self.features(x)
-        if self.top_layer and self.decoding:
-            y2 = self.decoder(x)
-            return y2
-        elif self.top_layer and not self.decoding:
-            y1 = self.top_layer(x)
-            return y1
-        else:
-            return x
         if self.top_layer:
             y1 = self.top_layer(x)
             return y1
@@ -67,13 +35,13 @@ class MLP(nn.Module):
 def make_layers_features(num_node, input_dim, bn):
     layers = []
     for v in num_node:
-        layer = nn.Linear(input_dim, v[0])
+        layer = nn.Linear(input_dim, v)
         if bn:
-            layers += [layer.cuda(), nn.BatchNorm1d(v[0]), nn.ReLU(inplace=True)]
+            layers += [layer.cuda(), nn.BatchNorm1d(v), nn.ReLU(inplace=True)]
         else:
             layers += [layer.cuda(), nn.ReLU(inplace=True)]
 
-        input_dim = v[0]
+        input_dim = v
     return nn.Sequential(*layers)
 
 
