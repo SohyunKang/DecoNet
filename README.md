@@ -42,3 +42,25 @@ This repository contains the code for our deep self-supervised learning framewor
 
 - Simultaneous atrophy feature extraction, clustering, and classification.
 - Effective disentanglement of disease heterogeneity into key dimensions, progreesion and subtypes, in the latent space.
+
+## Installation
+
+1. **Clone the repository**:
+
+    ```bash
+    git clone https://github.com/SohyunKang/DebaNet.git
+    cd DebaNet
+    ```
+
+2. **Install the required packages**:
+
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+## Usage
+
+To run the main analysis:
+
+```bash
+python src/main_script.py
