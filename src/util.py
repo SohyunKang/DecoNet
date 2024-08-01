@@ -1,12 +1,18 @@
 import os
-import pickle
+import json
 
 import numpy as np
 import torch
 from torch.utils.data.sampler import Sampler
 from itertools import permutations
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+import pandas as pd
+from scipy import io
+from sklearn import mixture
+from sklearn.mixture._gaussian_mixture import _compute_precision_cholesky
 
-import models
+import network
 
 
 def label_stab(images_lists_unmatched, images_lists_prev, label_unmatched):
@@ -32,21 +38,18 @@ def label_stab(images_lists_unmatched, images_lists_prev, label_unmatched):
         for k in range(len(images_lists_now[j])):
             label_now[images_lists_now[j][k]] = j
 
-    return label_now, images_lists_now
+    return np.array(label_now), images_lists_now
 
 
 def load_model(path):
-    """Loads model and return it without DataParallel table."""
     if os.path.isfile(path):
         print("=> loading checkpoint '{}'".format(path))
         checkpoint = torch.load(path)
-
         # size of the top layer
         N = checkpoint['state_dict']['top_layer.bias'].size()
-
+        print(N)
         # build skeleton of the model
-        model = models.__dict__[checkpoint['arch']](dim=1193, level='ic3',out=int(N[0]))
-
+        model = network.mlp(input_dim=1193, output_dim=N[0])
         # deal with a dataparallel table
         def rename_key(key):
             if not 'module' in key:
@@ -56,7 +59,6 @@ def load_model(path):
         checkpoint['state_dict'] = {rename_key(key): val
                                     for key, val
                                     in checkpoint['state_dict'].items()}
-
         # load weights
         model.load_state_dict(checkpoint['state_dict'])
         print("Loaded")
@@ -65,6 +67,14 @@ def load_model(path):
         print("=> no checkpoint found at '{}'".format(path))
     return model
 
+def load_gmm(path):
+    gmm_params = io.loadmat(path)['gm_params'][0,0][0][0]
+    clf = mixture.GaussianMixture(n_components=len(gmm_params[0]), covariance_type='full')
+    clf.weights_ = gmm_params[0]
+    clf.means_ = gmm_params[1]
+    clf.covariances_ = gmm_params[2]
+    clf.precisions_cholesky_ = _compute_precision_cholesky(clf.covariances_, 'full')
+    return clf
 
 class UnifLabelSampler(Sampler):
     """Samples elements uniformely accross pseudolabels.
@@ -120,11 +130,15 @@ class AverageMeter(object):
         self.count += n
         self.avg = self.sum / self.count
 
-def plotandsave():
-    # plot the last t-SNE
-    x_embedded = TSNE(n_components=2).fit_transform(features)
+def plotandsave(results_dir, results, train_index, test_index, gmm_params, model, optimizer, epoch):
+    if not os.path.isdir(results_dir):
+        os.makedirs(results_dir)
+
+    with open(results_dir + '/' + 'results.json', 'w') as f:
+        json.dump(results, f)
+    x_embedded = TSNE(n_components=2).fit_transform(results['features'][f'epoch_{epoch + 1}'])
     figure, axesSubplot = plt.subplots()
-    axesSubplot.scatter(x_embedded[:, 0], x_embedded[:, 1], c=pseudolabels_2)
+    axesSubplot.scatter(x_embedded[:, 0], x_embedded[:, 1], c=results['labels'][f'epoch_{epoch + 1}'])
     axesSubplot.set_xticks(())
     axesSubplot.set_yticks(())
     feature_tsne_file_name = 'fig%04d.png' % (epoch)
@@ -133,145 +147,47 @@ def plotandsave():
     plt.savefig(results_dir + '/' + feature_tsne_file_name)
     plt.close()
 
-    # plot the loss(or modularity, Q) curve
     plt.figure()
-    plt.plot(losses_t, 'y', label='train_loss')
-    plt.plot(losses_v, 'r', label='test_loss')
+    plt.plot(results['train_loss'], 'y', label='train_loss')
+    plt.plot(results['val_loss'], 'r', label='test_loss')
     plt.xlabel('epoch')
     plt.ylabel('loss')
     plt.legend()
     file_name = 'loss.png'
-
     plt.savefig(results_dir + '/' + file_name)
     plt.close()
-    (pd.DataFrame(np.array(losses_t))).to_csv(results_dir + '/' + 'loss_train.csv')
-    (pd.DataFrame(np.array(losses_v))).to_csv(results_dir + '/' + 'loss_test.csv')
 
-    # plot the clustering loss curve
     plt.figure()
-    plt.plot(clustering_losses_train, 'y', label='clustering_train_ll')
-    plt.plot(clustering_losses_test, 'r', label='clustering_test_ll')
-    plt.xlabel('epoch')
-    plt.ylabel('loss')
-    plt.legend()
-    file_name = 'clustering_loss.png'
-    plt.savefig(results_dir + '/' + file_name)
-    plt.close()
-    (pd.DataFrame(np.array(clustering_losses_train))).to_csv(results_dir + '/' + 'clustering_loss_train.csv')
-    (pd.DataFrame(np.array(clustering_losses_test))).to_csv(results_dir + '/' + 'clustering_loss_test.csv')
-
-    # plot the accuracy curve
-    plt.figure()
-    plt.plot(accs_t, 'y', label='train_accs')
-    plt.plot(accs_v, 'r', label='test_accs')
+    plt.plot(results['train_accuracy'], 'y', label='train_accs')
+    plt.plot(results['val_accuracy'], 'r', label='test_accs')
     plt.xlabel('epoch')
     plt.ylabel('accuracy')
     plt.legend(loc=1)
     file_name = 'acc.png'
     plt.savefig(results_dir + '/' + file_name)
     plt.close()
-    (pd.DataFrame(np.array(accs_t))).to_csv(results_dir + '/' + 'acc_train.csv')
-    (pd.DataFrame(np.array(accs_v))).to_csv(results_dir + '/' + 'acc_test.csv')
 
-    # plot the number of members in each cluster
-    c = []
-    max = 0
-    for i in range(len(m_list)):
-        if i == 0:
-            max = len(m_list[i])
-        else:
-            if len(m_list[i]) > max:
-                max = len(m_list[i])
-    for i in range(max):
-        c.append([])
-    for j in range(len(m_list)):
-        for i in range(max):
-            if len(m_list[j]) < max:
-                c[i].append(0)
-            else:
-                c[i].append(m_list[j][i])
     plt.figure()
-    clr = ['r', 'b', 'y', 'g', 'c', 'm', 'k', 'w'] * 1000
-    for i in range(len(m_list[0])):
-        plt.plot(c[i], color=clr[i])
-    plt.xlabel('epoch')
-    plt.ylabel('# of members')
-    plt.legend(loc=1)
-
-    file_name = 'members.png'
-    plt.savefig(results_dir + '/' + file_name)
-    plt.close()
-
-    # plot the nmi(or ami)
-    nmi[0] = 0
-    plt.figure()
-    plt.plot(nmi, label='AMI')
+    plt.plot(results['train_ami'], 'y', label='train_ami')
+    plt.plot(results['val_ami'], 'r', label='test_ami')
     plt.xlabel('epoch')
     plt.ylabel('AMI')
     plt.legend(loc=1)
     file_name = 'ami.png'
     plt.savefig(results_dir + '/' + file_name)
     plt.close()
-    (pd.DataFrame(np.array(nmi))).to_csv(results_dir + '/' + 'ami.csv')
-
-    # save the last labels
-    (pd.DataFrame(np.array(pseudolabels_2))).to_csv(results_dir + '/' + 'label.csv')
-    # plot the number of clusters(k) only for louvain method
 
     # save the train and test index
     (pd.DataFrame(np.array(train_index))).to_csv(results_dir + '/' + 'train_idx.csv')
     (pd.DataFrame(np.array(test_index))).to_csv(results_dir + '/' + 'test_idx.csv')
 
-    save_dict = {
-        'pseudolabels': np.array(pseudolabels)
-    }
-    sio.savemat(results_dir + '/' + 'pseudolabels.mat', save_dict)
-    print(np.concatenate(targets, axis=0).T)
-    output_dict = {
-        'outputs': np.reshape(np.concatenate(outputs, axis=0), (args.epochs, len(test_index), args.num_cluster))
-    }
-    sio.savemat(results_dir + '/' + 'outputs.mat', output_dict)
-
-    target_dict = {
-        'labels': np.reshape(np.concatenate(targets, axis=0).T, (args.epochs, len(test_index)))
-    }
-    sio.savemat(results_dir + '/' + 'labels.mat', target_dict)
-
-    savedict = {
-        'clus_features': np.array(clus_features)
-    }
-    sio.savemat(results_dir + '/' + 'clus_features.mat', savedict)
-
     save_gm_params = {
-        'gm_params': np.array(params)
+        'gm_params': np.array(gmm_params)
     }
-    sio.savemat(results_dir + '/' + 'gm_params.mat', save_gm_params)
+    io.savemat(results_dir + '/' + 'gm_params.mat', save_gm_params)
 
     torch.save({'epoch': epoch,
-                'arch': args.arch,
                 'state_dict': model.state_dict(),
                 'optimizer': optimizer.state_dict()},
                os.path.join(results_dir, 'checkpoint_epoch%04d.pth.tar' % epoch))
-
-
-def learning_rate_decay(optimizer, t, lr_0):
-    for param_group in optimizer.param_groups:
-        lr = lr_0 / np.sqrt(1 + lr_0 * param_group['weight_decay'] * t)
-        param_group['lr'] = lr
-
-
-class Logger(object):
-    """ Class to update every epoch to keep trace of the results
-    Methods:
-        - log() log and save
-    """
-
-    def __init__(self, path):
-        self.path = path
-        self.data = []
-
-    def log(self, train_point):
-        self.data.append(train_point)
-        with open(os.path.join(self.path), 'wb') as fp:
-            pickle.dump(self.data, fp, -1)
 

@@ -3,6 +3,7 @@ from sklearn import mixture
 import numpy as np
 import torchvision.transforms as transforms
 import torch.utils.data as data
+from scipy import io
 
 
 class ReassignedDataset(data.Dataset):
@@ -26,16 +27,6 @@ class ReassignedDataset(data.Dataset):
         return self.len
 
 
-def arrange_clustering(images_lists):
-    pseudolabels = []
-    image_indexes = []
-    for cluster, images in enumerate(images_lists):
-        image_indexes.extend(images)
-        pseudolabels.extend([cluster] * len(images))
-    indexes = np.argsort(image_indexes)
-    return np.asarray(pseudolabels)[indexes]
-
-
 def run_gmm(x, train_idx, test_idx, k):
     clf = mixture.GaussianMixture(n_components=k, covariance_type='full')
     label_array = np.ones((len(x)))
@@ -51,6 +42,7 @@ def run_gmm(x, train_idx, test_idx, k):
     label_array[train_idx] = list(label_train)
     label_array[test_idx] = list(label_test)
     return label_array, gmm_params
+
 
 
 class GMM(object):

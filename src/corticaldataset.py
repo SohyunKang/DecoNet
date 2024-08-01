@@ -13,20 +13,20 @@ class CorticalDataset(Dataset):
         self.mode = mode
         self.seed = 31
         np.random.seed = self.seed
+        Wscore_ADNI_AD = np.array(io.loadmat('../data/ADNI_Wscore.mat')['Wscore'], dtype=np.float32)
+        atrophy_ADNI_AD = wscore2atrophy(Wscore_ADNI_AD)
+        idx = np.array(io.loadmat('../data/nan_idx_ic3.mat')['idx'], dtype=np.uint32)
+        atrophy_ADNI_AD = np.delete(atrophy_ADNI_AD, idx - 1, 1)
         if mode == 'train':
-            Wscore_ADNI_AD = np.array(io.loadmat('./data/ADNI_Wscore.mat')['Wscore'], dtype=np.float32)
-            atrophy_ADNI_AD = wscore2atrophy(Wscore_ADNI_AD)
             if datatype == 'ADNI':
                 Wscore = Wscore_ADNI_AD
             elif datatype == 'ADNI_mci':
-                Wscore = np.array(io.loadmat('./data/ADNI_mci_Wscore.mat')['Wscore'], dtype=np.float32)
+                Wscore = np.array(io.loadmat('../data/ADNI_mci_Wscore.mat')['Wscore'], dtype=np.float32)
             elif datatype == 'ADNI_long':
-                Wscore = np.array(io.loadmat('./data/ADNI_long_Wscore.mat')['Wscore'], dtype=np.float32)
+                Wscore = np.array(io.loadmat('../data/ADNI_long_Wscore.mat')['Wscore'], dtype=np.float32)
             elif datatype == 'OASIS_atrophy':
                 Wscore = np.array(io.loadmat('./data/OASIS_Wscore.mat')['Wscore'], dtype=np.float32)
-
             atrophy = wscore2atrophy(Wscore)
-            idx = np.array(io.loadmat('./data/nan_idx_ic3.mat')['idx'], dtype=np.uint32)
             atrophy = np.delete(atrophy, idx - 1, 1)
             print(atrophy)
             if datatype == 'OASIS_atrophy':
@@ -35,6 +35,11 @@ class CorticalDataset(Dataset):
                 mean_ADNI_AD = atrophy_ADNI_AD.mean()
                 std_ADNI_AD = atrophy_ADNI_AD.std(ddof=1)
                 atrophy = (atrophy - mean_ADNI_AD) / std_ADNI_AD
+        elif mode == 'test':
+            Wscore = np.array(io.loadmat('../data/ADNI_mci_Wscore.mat')['Wscore'], dtype=np.float32)
+            atrophy = wscore2atrophy(Wscore)
+            atrophy = np.delete(atrophy, idx - 1, 1)
+            atrophy = (atrophy - atrophy.mean()) / atrophy.std(ddof=1)
 
         self.x_data = torch.from_numpy(atrophy)
         print(self.x_data, self.x_data.shape)

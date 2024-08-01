@@ -11,55 +11,62 @@
 
 import argparse
 import time
-import network
+from datetime import datetime
+import random
+import os
+
+from src import network
 import clustering
-from util import label_stab, UnifLabelSampler, AverageMeter, plotandsave, load_model
+import corticaldataset
+from src.util import label_stab, UnifLabelSampler, AverageMeter, plotandsave, load_model, load_gmm
+
 from sklearn.metrics import adjusted_mutual_info_score
 from sklearn.model_selection import KFold
 import numpy as np
 import pandas as pd
-import random
 import torch
 import torch.nn as nn
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.optim
 import torch.utils.data
-import torchvision.transforms as transforms
-import corticaldataset
-import os
+
+
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='PyTorch Implemenation of Subtyping with DeepCluster')
-
-    parser.add_argument('--mode', type=str,
-                        choices=['train', 'flatcv', 'nestedcv', 'test'], default='train',
-                        help='Setting the mode (default: train)')
+    parser = argparse.ArgumentParser(description='PyTorch Implementation of DebaNet')
+    parser.add_argument('--mode', type=str, choices=['train', 'test'], default='train',
+                        help='Mode setting: train or test (default: train)')
     parser.add_argument('--data', type=str, choices=['ADNI', 'ADNI_mci', 'ADNI_long', 'OASIS'],
-                        default='ADNI', help='choose which data type you will use')
+                        default='ADNI', help='Data type to use (default: ADNI)')
     parser.add_argument('--num_cluster', '--k', type=int, default=4,
-                        help='number of cluster for k-means AND gaussian mixture model (default: 3)')
-    parser.add_argument('--lr', default=0.001, type=float,
-                        help='learning rate (default: 0.001)')
-    parser.add_argument('--wd', default=-5, type=float,
-                        help='weight decay pow (default: -5)')
-    parser.add_argument('--reassign', type=float, default=1.,
-                        help="""how many epochs of training between two consecutive
-                        reassignments of clusters (default: 1)""")
-    parser.add_argument('--workers', default=4, type=int,
-                        help='number of data loading workers (default: 4')
+                        help='Number of clusters for k-means and Gaussian mixture model (default: 4)')
+    parser.add_argument('--lr', type=float, default=0.001,
+                        help='Learning rate (default: 0.001)')
+    parser.add_argument('--reassign', type=float, default=1.0,
+                        help='Epochs between consecutive reassignments of clusters (default: 1)')
+    parser.add_argument('--wd', type=float, default=-5,
+                        help='Weight decay power (default: -5)')
+    parser.add_argument('--workers', type=int, default=4,
+                        help='Number of data loading workers (default: 4)')
     parser.add_argument('--epochs', type=int, default=100,
-                        help='number of total epochs to run (default: 100)')
-    parser.add_argument('--batch', default=64, type=int,
-                        help='mini-batch size (default: 64)')
-    parser.add_argument('--momentum', default=0.9, type=float, help='momentum (default: 0.9)')
-    parser.add_argument('--seed', type=int, default=31, help='random seed (default: 31)')
-    parser.add_argument('--fold_seed', type=int, default=31, help='random seed (default: 31)')
-    parser.add_argument('--fold_idx', type=int, default=0, help='choose the fold index of cross-validation')
-    parser.add_argument('--model', default='', type=str, metavar='PATH',
-                        help='path to model (default: None)')
-    return parser.parse_args()
+                        help='Total number of epochs to run (default: 100)')
+    parser.add_argument('--batch', type=int, default=64,
+                        help='Mini-batch size (default: 64)')
+    parser.add_argument('--momentum', type=float, default=0.9,
+                        help='Momentum (default: 0.9)')
+    parser.add_argument('--seed', type=int, default=31,
+                        help='Random seed (default: 31)')
+    parser.add_argument('--fold_seed', type=int, default=31,
+                        help='Random seed for cross-validation (default: 31)')
+    parser.add_argument('--fold_idx', type=int, default=0,
+                        help='Fold index for cross-validation')
+    parser.add_argument('--model', type=str, default='', metavar='PATH',
+                        help='Path to the model (default: None)')
+    parser.add_argument('--gmmmodel', type=str, default='', metavar='PATH',
+                        help='Path to the clustering model (default: None)')
 
+    return parser.parse_args()
 
 def compute_features(dataloader, model, N):
     model.eval()
@@ -74,17 +81,17 @@ def compute_features(dataloader, model, N):
         else:
             # special treatment for final batch
             features[i * args.batch:] = aux
+
     return features
 
 def train(loader, model, crit, opt):
-    """Training of the MLP.
+    """Training of the encoder and classifier.
         Args:
             loader (torch.utils.data.DataLoader): Data loader
             model (nn.Module): mlp
             crit (torch.nn): loss
             opt (torch.optim.SGD): optimizer for every parameters with True
                                    requires_grad in model except top layer
-            epoch (int)
     """
     model.train()
     # create an optimizer for the last fc layer
@@ -111,7 +118,7 @@ def train(loader, model, crit, opt):
         torch.cuda.memory_allocated()
 
 def feedforward(loader, model, crit):
-    """Training of the MLP.
+    """Just feedforward.
         Args:
             loader (torch.utils.data.DataLoader): Data loader
             model (nn.Module): mlp
@@ -139,72 +146,10 @@ def feedforward(loader, model, crit):
         losses.update(loss.item(), input_tensor.size(0))
         torch.cuda.memory_allocated()
 
-    return losses.avg,  100*correct/total, outputs
-
-
-def test_(loader, model):
-    """Training of the CNN.
-        Args:
-            loader (torch.utils.data.DataLoader): Data loader
-            model (nn.Module): CNN
-            crit (torch.nn): loss
-            opt (torch.optim.SGD): optimizer for every parameters with True
-                                   requires_grad in model except top layer
-            epoch (int)
-    """
-    batch_time = AverageMeter()
-    data_time = AverageMeter()
-
-    # switch to train mode
-    model.eval()
-
-    end = time.time()
-    total = 0
-    correct = 0
-    predicts = []
-    for i, (input_tensor, target) in enumerate(loader):
-        data_time.update(time.time() - end)
-
-        target = target.cuda()
-        input_var = torch.autograd.Variable(input_tensor.cuda())
-        target_var = torch.autograd.Variable(target)
-        output = model(input_var)
-
-        _, predicted = torch.max(output, 1)
-        # print('####', predicted, predicted.size)
-        # print('#####', target_var, target_var.size)
-
-        total += target.size(0)
-        correct += (predicted == target_var).sum().item()
-        predicts.extend(list(np.array(predicted.cpu())))
-        # record loss
-        # print('loss: ', loss.item(), input_tensor.size(0))
-
-
-
-        # measure elapsed time
-        batch_time.update(time.time() - end)
-        end = time.time()
-
-        # if (i % 1) == 0:
-        #     print('Epoch: [{0}][{1}/{2}]\t'
-        #             'Time: {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-        #             'Data: {data_time.val:.3f} ({data_time.avg:.3f})\t'
-        #             'Loss: {loss.val:.4f} ({loss.avg:.4f})'
-        #             .format(epoch, i, len(loader), batch_time=batch_time,
-        #                     data_time=data_time, loss=losses))
-        torch.cuda.memory_allocated()
-
-    print('TEST Acc: %d/%d = %d %%' % ( correct, total, 100 * correct / total ))
-
-    return 100*correct/total, predicts
-
-
-    # fix random seeds
-
+    return losses.avg,  100*correct/total, outputs.cpu().detach().numpy()
 
 args = parse_args()
-if args.mode == 'flatcv':
+if args.mode == 'train':
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         print("/// Cuda is available ///")
@@ -212,12 +157,10 @@ if args.mode == 'flatcv':
     np.random.seed(args.seed)
     random.seed(args.seed)
 
-
     print('K : {}'.format(args.num_cluster))
     print('Data: {}'.format(args.data))
     print('learning rate: {}'.format(args.lr))
     print('reassign : {}'.format(args.reassign))
-
 
     model = network.mlp(input_dim=1193, output_dim=args.num_cluster)
     fd = int(model.top_layer.weight.size()[1])
@@ -257,7 +200,7 @@ if args.mode == 'flatcv':
     # Gaussian mixture model
     GMM = clustering.GMM(args.num_cluster)
 
-    # train
+    # log
     results = {
         'train_loss': [],
         'train_accuracy': [],
@@ -270,11 +213,6 @@ if args.mode == 'flatcv':
         'val_predictions': {},  # epoch x subject x clusters
     }
 
-    script_dir = os.path.dirname(__file__)
-    profile = '_%s_k=%d_lr=%f_ep=%d_reassign=%d_fold_idx=%d'\
-                  % (args.data, args.num_cluster, args.lr, args.epochs, args.reassign,  args.fold_idx)
-    results_dir = os.path.join(script_dir, 'Results'+profile)
-
     for epoch in range(args.epochs):
         end = time.time()
         model.top_layer = None
@@ -286,7 +224,7 @@ if args.mode == 'flatcv':
         images_lists_unmatched = GMM.images_lists
 
         if epoch == 0:
-            label_prev = label_unmatched
+            label_prev = label_unmatched.astype(int)
             images_lists_prev = images_lists_unmatched
         else:
             label_prev = label_now
@@ -295,14 +233,13 @@ if args.mode == 'flatcv':
         # label stabilization for calculating accuracy
         label_now, images_lists_now = label_stab(images_lists_unmatched, images_lists_prev, label_unmatched)
 
-        results['features'][f'epoch_{epoch + 1}'].append(features)
-        results['labels'][f'epoch_{epoch+1}'].append(label_now)
+        results['features'][f'epoch_{epoch + 1}'] = features.tolist()
+        results['labels'][f'epoch_{epoch+1}'] = label_now.tolist()
 
         train_ami = adjusted_mutual_info_score(label_prev[train_index], label_now[train_index])
         val_ami = adjusted_mutual_info_score(label_prev[test_index], label_now[test_index])
         results['train_ami'].append(train_ami)
         results['val_ami'].append(val_ami)
-
 
         # assign pseudo-labels
         train_dataset = clustering.ReassignedDataset(dataset.x_data.numpy()[train_index],
@@ -313,8 +250,8 @@ if args.mode == 'flatcv':
         # sampler
         images_lists_train_abs = [[] for i in range(len(images_lists_now))]
         images_lists_test_abs = [[] for i in range(len(images_lists_now))]
-        train_index = list(set(train_index))
-        test_index = list(set(test_index))
+        train_index = np.array(list(set(train_index)), dtype=int)
+        test_index = np.array(list(set(test_index)), dtype=int)
         for label, image_list in enumerate(images_lists_now):
             images_lists_train_abs[label] = [i for i, idx in enumerate(train_index) if idx in image_list]
             images_lists_test_abs[label] = [i for i, idx in enumerate(test_index) if idx in image_list]
@@ -361,22 +298,26 @@ if args.mode == 'flatcv':
 
         results['train_loss'].append(loss_t)
         results['train_accuracy'].append(acc_t)
-        results['test_loss'].append(loss_v)
-        results['test_accuracy'].append(acc_v)
-        results['val_predictions'][f'epoch_{epoch + 1}'].append(output_test)
+        results['val_loss'].append(loss_v)
+        results['val_accuracy'].append(acc_v)
+        results['val_predictions'][f'epoch_{epoch + 1}'] = output_test.tolist()
 
         print(
             'Epoch [{0}]| Total time: {1:.2f} s | Train loss: {2:.2f} | Val loss: {3:.2f} | Train acc: {4: .1f} | Val acc: {5: .1f} | Train AMI: {6: .1f} | Val AMI: {7: .1f} | Inclass size: '
             .format(epoch, time.time() - end,  loss_t, loss_v,
-                    acc_t, acc_v, train_ami, val_ami), [len(x) for x in label_now])
+                    acc_t, acc_v, train_ami, val_ami), [len(x) for x in images_lists_now])
 
-    plotandsave()
-
-
+    script_dir = os.path.dirname(__file__)
+    now = datetime.now()
+    datetime_string = now.strftime("%Y%m%d%H%M%S")
+    profile = '_%s_%s_%s_k=%d_lr=%f_reassign=%d_ep=%d_fold_idx=%d' \
+              % (datetime_string, args.mode, args.data, args.num_cluster, args.lr, args.reassign, args.epochs,
+                 args.fold_idx)
+    results_dir = os.path.join(script_dir, 'Results' + profile)
+    plotandsave(results_dir, results, train_index, test_index, gmm_params, model, optimizer, epoch)
 
 
 elif args.mode == 'test':
-    # fix random seeds
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         print("/// Cuda is available ///")
@@ -384,86 +325,90 @@ elif args.mode == 'test':
     np.random.seed(args.seed)
     random.seed(args.seed)
 
-
-    # Front architecture
-    print('Mode: {}'.format(args.mode))
-    print('Architecture: {}'.format(args.arch))
-    print('Data: {}'.format(args.data))
-    print('DX: {}'.format(args.dx))
-    print('Clustering method: {}'.format(args.clustering))
-    print('')
-
+    # load model and GMM
     model = load_model(args.model)
-
+    gmm = load_gmm(args.gmmmodel)
     model.cuda()
     cudnn.benchmark = True
 
     # load data
     end = time.time()
     print("loading the dataset...")
-
-    # data-type & subjects selection
-
-    if args.data == 'atrophy':
-        if args.dx == 'mci':
-            transform = transforms.Compose([transforms.ToTensor,
-                                            transforms.Normalize([0.4281], [0.6008])])
-            dataset = corticaldataset.CorticalDataset(mode=args.mode, dx='mci', datatype='atrophy', transform=transform)
-            print(dataset, len(dataset))
-    elif args.data == 'wscore':
-        if args.dx == 'total':
-            transform = transforms.Compose([transforms.ToTensor,
-                                            transforms.Normalize([0], [0.78])])
-            dataset = corticaldataset.CorticalDataset(mode=args.mode, dx='total', datatype='wscore', transform=transform)
-
+    dataset = corticaldataset.CorticalDataset(mode=args.mode)
+    print(dataset, len(dataset))
     print('Data loading time: {0:.2f} s'.format(time.time() - end))
-    print(dataset.x_data.numpy().mean(), dataset.x_data.numpy().std(ddof=1))#calculate the mean and standard deviation of test data
-
 
     dataloader = torch.utils.data.DataLoader(dataset,
                                              batch_size=args.batch,
                                              num_workers=args.workers,
                                              pin_memory=True, )
 
-    # train
-    accs_t = []
+    # compute features and pseudo-labels
+    top_layer = model.top_layer
+    model.top_layer = None
+    model.features = nn.Sequential(*list(model.features.children())[:-1])
+    feature = compute_features(dataloader, model, len(dataset))
+    label = gmm.predict(feature)
 
-    # making top directory's profile and some directories at each implementation
+    # add classifier
+    tmp = list(model.features.children())
+    tmp.append(nn.ReLU().cuda())
+    model.features = nn.Sequential(*tmp)
+    model.top_layer = top_layer
+    model.top_layer.cuda()
 
+    # test dataset
+    test_dataset = clustering.ReassignedDataset(dataset.x_data.numpy(), label)
+    test_dataloader = torch.utils.data.DataLoader(
+        test_dataset,
+        batch_size=args.batch,
+        num_workers=args.workers,
+        pin_memory=True)
+
+    # loss function
+    criterion = nn.CrossEntropyLoss().cuda()
+
+    # prediction
+    _, _, outputs = feedforward(test_dataloader, model, criterion)
+    predicted_labels = np.argmax(outputs, 1)
+
+    # re-label
+    uniques, counts = np.unique(predicted_labels, return_counts=True)
+    unique_counts = list(zip(uniques, counts))
+
+    image_list_unmatched = [[] for i in range(len(uniques))]
+    for i in range(len(label)):
+        image_list_unmatched[int(label[i])].append(i)
+    image_list_predicted = [[] for i in range(len(uniques))]
+    for i in range(len(predicted_labels)):
+        image_list_predicted[int(predicted_labels[i])].append(i)
+    label, _ = label_stab(image_list_unmatched, image_list_predicted, label)
+
+    test_dataset2 = clustering.ReassignedDataset(dataset.x_data.numpy(), label)
+    test_dataloader2 = torch.utils.data.DataLoader(
+        test_dataset2,
+        batch_size=args.batch,
+        num_workers=args.workers,
+        pin_memory=True)
+
+    # compute loss and accuracy
+    loss, acc, outputs = feedforward(test_dataloader2, model, criterion)
+
+    print('Loss: {0:.2f} | Accuracy: {1:.1f} | label: '.format(loss, acc), unique_counts)
+
+    # save outputs and labels
     script_dir = os.path.dirname(__file__)
-    loss_dir = os.path.join(script_dir, '0_loss')
-    acc_dir = os.path.join(script_dir, '6_acc')
+    now = datetime.now()
+    datetime_string = now.strftime("%Y%m%d%H%M%S")
+    profile = '_%s_%s_%s_k=%d_lr=%f_reassign=%d_ep=%d_fold_idx=%d' \
+              % (datetime_string, args.mode, args.data, args.num_cluster, args.lr, args.reassign, args.epochs,
+                 args.fold_idx)
+    results_dir = os.path.join(script_dir, 'Results' + profile)
 
-
-    profile = '_test_%s_%s_%s_%s_k=%d_lr=%f_ep=%d_reassign=%d_earlystop=%s_niter=%d_fold_idx=%d' % (args.no, args.data, args.dx, args.clustering, args.num_cluster, args.lr, args.epochs, args.reassign, args.earlystop, args.niter, args.fold_idx)
-    results_dir = os.path.join(script_dir, 'Results'+profile)
     if not os.path.isdir(results_dir):
         os.makedirs(results_dir)
-
-    # index = list(range(len(dataset)))
-    # random.shuffle(index)
-    # test_index = index[int(len(dataset) * 0.9):]
-    # test_index.sort()
-    # train_index = index[:int(len(dataset) * 0.9)]
-    # train_index.sort()
-    """ Train Test index """
-
-
-    end = time.time()
-    # remove head
-    # model.top_layer = None
-
-
-    #################################################################
-    ########## train network with clusters as pseudo-labels #########
-    #################################################################
-
-
-    acc_t, predicts = test_(dataloader, model)
-
-    accs_t.append(acc_t)
-    print(predicts)
-    (pd.DataFrame(np.array(predicts))).to_csv(results_dir + '/' + 'predicted_labels%s.csv' % (profile))
+    (pd.DataFrame(np.array(outputs))).to_csv(results_dir + '/' + 'outputs.csv')
+    (pd.DataFrame(np.array(predicted_labels))).to_csv(results_dir + '/' + 'predicted_labels.csv')
 
 
 

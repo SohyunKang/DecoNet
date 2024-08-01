@@ -8,7 +8,7 @@ Authors: Sohyun Kang, Sung-Woo Kim, Joon-Kyung Seong
 
 Published in: *Neuroimage*, 2024
 
-![Framework Architecture](thumbnail.png)
+![Framework Architecture](img/thumbnail.png)
 
 ## Table of Contents
 
@@ -24,7 +24,7 @@ Published in: *Neuroimage*, 2024
 ## Introduction
 
 ### Overview
-![Framework Architecture](img_architecture.png)
+![Framework Architecture](img/img_architecture.png)
 This repository contains the code for our deep self-supervised learning framework to disentangle heterogeneous features of brain atrophy in Alzheimer's Disease patients. Based on the clustering-based deep self-supervised learning framework by Caron et al. (2018), our method integrates atrophy feature extraction, clustering, and classification into an end-to-end learning process.
 
 ### Framework Steps
