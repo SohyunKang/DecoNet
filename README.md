@@ -1,4 +1,4 @@
-# DebaNet
+# DecoNet
 
 This repository contains the code and data associated with the publication:
 
