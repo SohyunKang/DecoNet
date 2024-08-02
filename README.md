@@ -1,4 +1,4 @@
-# DecoNet
+# DecoNet: Disentangling heterogeneity in latent space by self-supervised framework
 
 This repository contains the code and data associated with the publication:
 
